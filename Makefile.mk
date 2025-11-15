@@ -18,7 +18,7 @@ CONFIG_DIR ?= /etc/$(PROJECT_NAME)
 PYTHON_EXECUTABLE ?= python3
 
 # System dependencies from README.md and install.sh
-DEPS := git python3-pip python3-evdev python3-numpy python3-pil python3-flask python3-toml fonts-dejavu-core
+DEPS := git python3-pip python3-evdev python3-numpy python3-pil python3-flask python3-toml fonts-dejavu-core python3-rpi.gpio
 
 # Use .DEFAULT_GOAL to make `help` the default action.
 .DEFAULT_GOAL := help
@@ -81,7 +81,7 @@ setup-app:
 	@echo "---> Setting application file permissions..."
 	sudo chown -R $(APP_USER):$(APP_USER) $(APP_DIR)
 	@echo "---> Creating Python virtual environment at $(VENV_DIR)..."
-	sudo -u $(APP_USER) $(PYTHON_EXECUTABLE) -m venv $(VENV_DIR)
+	sudo -u $(APP_USER) $(PYTHON_EXECUTABLE) -m venv --system-site-packages $(VENV_DIR)
 	@echo "---> Installing Python dependencies from requirements.txt..."
 	sudo $(VENV_DIR)/bin/pip install --upgrade pip
 	sudo $(VENV_DIR)/bin/pip install -r $(APP_DIR)/requirements.txt
