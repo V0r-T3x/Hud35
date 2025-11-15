@@ -3,3 +3,6 @@ Pillow
 evdev
 toml
 numpy
+requests
+Flask
+st7789
