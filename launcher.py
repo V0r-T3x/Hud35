@@ -17,9 +17,18 @@ app.secret_key = 'hud-launcher-secret-key'
 CONFIG_PATH = "config.toml"
 DEFAULT_CONFIG = {
     "display": {
+        #"type": "st7789",
         "type": "framebuffer",
         "framebuffer": "/dev/fb1",
-        "rotation": 0
+        "rotation": 0,
+        #"st7789": {
+        #    "spi_port": 0,
+        #    "spi_cs": 1,
+        #    "dc_pin": 9,
+        #    "backlight_pin": 13,
+        #    "rotation": 0,
+        #    "spi_speed": 60000000
+        #}
     },
     "fonts": {
         "large_font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -39,11 +48,9 @@ DEFAULT_CONFIG = {
         "openweather": "",
         "google_geo": "",
         "client_id": "",
-        "client_secret": "",
-        "redirect_uri": "http://127.0.0.1:5000"
+        "client_secret": ""
     },
     "settings": {
-        "start_screen": "weather",
         "fallback_city": "",
         "use_gpsd": True,
         "use_google_geo": True,
@@ -59,6 +66,12 @@ DEFAULT_CONFIG = {
         "ap_ssid": "Neonwifi-Manager",
         "ap_ip": "192.168.42.1",
     },
+    "buttons": {
+        "button_a": 5,
+        "button_b": 6,
+        "button_x": 16,
+        "button_y": 24
+    },
     "auto_start": {
         "auto_start_hud35": True,
         "auto_start_neonwifi": True,
@@ -72,19 +85,33 @@ DEFAULT_CONFIG = {
 hud35_process = None
 neonwifi_process = None
 last_logged_song = None
-
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, 'w') as f:
             toml.dump(DEFAULT_CONFIG, f)
         return DEFAULT_CONFIG.copy()
-    
     try:
         with open(CONFIG_PATH, 'r') as f:
-            return toml.load(f)
+            loaded_config = toml.load(f)
+        
+        import copy
+        merged_config = copy.deepcopy(DEFAULT_CONFIG)
+        
+        for category, items in loaded_config.items():
+            if category in merged_config and isinstance(merged_config[category], dict):
+                for key, value in items.items():
+                    merged_config[category][key] = value
+            else:
+                merged_config[category] = items
+
+        save_config(merged_config)
+        return merged_config
     except Exception as e:
-        print(f"Error loading config: {e}")
-        print("Using default configuration")
+        logger = logging.getLogger('Launcher')
+        logger.error(f"Error loading or merging config: {e}. Backing up and using defaults.")
+        if os.path.exists(CONFIG_PATH):
+            os.rename(CONFIG_PATH, f"{CONFIG_PATH}.bak")
+        save_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG.copy()
 
 def save_config(config):
@@ -148,15 +175,25 @@ def auto_launch_applications():
             start_hud35()
             logger.info("✅ HUD35 auto-started")
         else:
-            logger.warning("⚠️ HUD35 not auto-started: configuration incomplete")
+            if not config_ready: pass # The reason is already logged by is_config_ready()
+            elif not spotify_authenticated: logger.warning("⚠️ HUD35 not auto-started: Spotify not authenticated.")
 
 def is_config_ready():
     config = load_config()
-    return all([
-        config["api_keys"]["openweather"],
-        config["api_keys"]["client_id"], 
-        config["api_keys"]["client_secret"]
-    ])
+    logger = logging.getLogger('Launcher')
+    missing_keys = []
+    if not config["api_keys"].get("openweather"):
+        missing_keys.append("OpenWeather")
+    if not config["api_keys"].get("client_id"):
+        missing_keys.append("Spotify Client ID")
+    if not config["api_keys"].get("client_secret"):
+        missing_keys.append("Spotify Client Secret")
+    
+    if missing_keys:
+        logger.warning(f"Configuration is missing the following required API keys: {', '.join(missing_keys)}")
+        return False
+    
+    return True
 
 def check_spotify_auth():
     config = load_config()
@@ -168,7 +205,7 @@ def check_spotify_auth():
         sp_oauth = SpotifyOAuth(
             client_id=config["api_keys"]["client_id"],
             client_secret=config["api_keys"]["client_secret"],
-            redirect_uri=config["api_keys"]["redirect_uri"],
+            redirect_uri="http://127.0.0.1:5000/callback",
             scope="user-read-currently-playing",
             cache_path=".spotify_cache"
         )
@@ -254,6 +291,7 @@ def start_hud35():
     global hud35_process, last_logged_song
     logger = logging.getLogger('Launcher')
     if is_hud35_running():
+        logger.warning("HUD35 is already running, no action taken.")
         return False, "HUD35 is already running"
     try:
         hud35_process = subprocess.Popen(
@@ -264,6 +302,7 @@ def start_hud35():
             bufsize=1,
             universal_newlines=True
         )
+        logger.info(f"🚀 Starting HUD35 with PID: {hud35_process.pid}")
         def log_hud35_output():
             for line in iter(hud35_process.stdout.readline, ''):
                 if line.strip():
@@ -295,12 +334,14 @@ def stop_hud35():
     global hud35_process, last_logged_song
     logger = logging.getLogger('Launcher')
     if not is_hud35_running():
+        logger.warning("HUD35 is not running, no action taken.")
         return False, "HUD35 is not running"
     try:
-        logger.info("Stopping HUD35...")
+        logger.info(f"🛑 Stopping HUD35 with PID: {hud35_process.pid}...")
         hud35_process.terminate()
         try:
             hud35_process.wait(timeout=5)
+            logger.info(f"HUD35 process {hud35_process.pid} terminated gracefully.")
         except subprocess.TimeoutExpired:
             hud35_process.kill()
             hud35_process.wait()
@@ -316,6 +357,7 @@ def start_neonwifi():
     global neonwifi_process
     logger = logging.getLogger('Launcher')
     if is_neonwifi_running():
+        logger.warning("neonwifi is already running, no action taken.")
         return False, "neonwifi is already running"
     try:
         neonwifi_process = subprocess.Popen(
@@ -326,6 +368,7 @@ def start_neonwifi():
             bufsize=1,
             universal_newlines=True
         )
+        logger.info(f"🚀 Starting neonwifi with PID: {neonwifi_process.pid}")
         def log_neonwifi_output():
             for line in iter(neonwifi_process.stdout.readline, ''):
                 if line.strip():
@@ -346,9 +389,11 @@ def stop_neonwifi():
     global neonwifi_process
     logger = logging.getLogger('Launcher')
     if not is_neonwifi_running():
+        logger.warning("neonwifi is not running, no action taken.")
         return False, "neonwifi is not running"
     try:
-        logger.info("Stopping neonwifi...")
+        pid_to_stop = neonwifi_process.pid if neonwifi_process else "N/A"
+        logger.info(f"🛑 Stopping neonwifi with PID: {pid_to_stop}...")
         if neonwifi_process:
             neonwifi_process.terminate()
             try:
@@ -416,12 +461,21 @@ def toggle_themeac():
 @app.route('/save_all_config', methods=['POST'])
 def save_all_config():
     config = load_config()
+
+    # API Keys
+    config["api_keys"]["openweather"] = request.form.get('openweather', '')
+    config["api_keys"]["client_id"] = request.form.get('client_id', '')
+    config["api_keys"]["client_secret"] = request.form.get('client_secret', '')
+    config["api_keys"]["google_geo"] = request.form.get('google_geo', '')
+
+    # Auto-start settings
     auto_start_hud35 = 'auto_start_hud35' in request.form
     auto_start_neonwifi = 'auto_start_neonwifi' in request.form
     config["auto_start"] = {
         "auto_start_hud35": auto_start_hud35,
         "auto_start_neonwifi": auto_start_neonwifi
     }
+
     save_config(config)
     if is_hud35_running():
         stop_hud35()
@@ -475,34 +529,68 @@ def stop_neonwifi_route():
 @app.route('/spotify_auth')
 def spotify_auth_page():
     config = load_config()
+    lan_ips = []
+    try:
+        hostname = socket.gethostname()
+        all_ips = socket.getaddrinfo(hostname, None)
+        for addr_info in all_ips:
+            ip = addr_info[4][0]
+            if '.' in ip and not ip.startswith('127.'):
+                lan_ips.append(ip)
+        lan_ips = list(set(lan_ips))
+    except Exception:
+        pass
+
+
     if not config["api_keys"]["client_id"] or not config["api_keys"]["client_secret"]:
         flash('error', 'Please save Spotify Client ID and Secret first.')
         return redirect(url_for('index'))
+    
+    port = request.host.split(':')[-1] if ':' in request.host else '5000'
+    
+    # Prefer LAN IP for easier one-click auth if available, otherwise fallback to localhost
+    if lan_ips:
+        # Use the first LAN IP found. The user must add this to their Spotify Dashboard.
+        redirect_uri = f"http://{lan_ips[0]}:{port}/callback"
+    else:
+        # Fallback for systems where LAN IP can't be determined.
+        redirect_uri = f"http://127.0.0.1:{port}/callback"
+
     try:
         sp_oauth = SpotifyOAuth(
             client_id=config["api_keys"]["client_id"],
             client_secret=config["api_keys"]["client_secret"],
-            redirect_uri=config["api_keys"]["redirect_uri"],
+            redirect_uri=redirect_uri,
             scope="user-read-currently-playing",
             cache_path=".spotify_cache",
             show_dialog=True
         )
         auth_url = sp_oauth.get_authorize_url()
-        return render_template('spotify_auth.html', auth_url=auth_url)
+        return render_template('spotify_auth.html', auth_url=auth_url, lan_ips=lan_ips, port=port)
     except Exception as e:
         flash('error', f'Spotify authentication error: {str(e)}')
         return redirect(url_for('index'))
 
-@app.route('/process_callback_url', methods=['POST'])
-def process_callback_url():
+@app.route('/callback', methods=['POST'])
+def callback():
     config = load_config()
-    callback_url = request.form.get('callback_url', '').strip()
-    if not callback_url:
-        flash('error', 'Please paste the callback URL')
-        return redirect(url_for('spotify_auth_page'))
-    try:
+    logger = logging.getLogger('Launcher')
+
+    # Handle both GET from Spotify redirect and POST from manual paste
+    if request.method == 'POST':
+        callback_url = request.form.get('callback_url', '').strip()
+        if not callback_url:
+            flash('error', 'Please paste the callback URL')
+            return redirect(url_for('spotify_auth_page'))
         parsed_url = urllib.parse.urlparse(callback_url)
         query_params = urllib.parse.parse_qs(parsed_url.query)
+    else: # GET request, which is not yet handled by this route.
+        # This part of the logic will be added in the next step.
+        # For now, we are just modifying the POST logic.
+        flash('error', 'Automated callback not yet implemented for GET.')
+        return redirect(url_for('spotify_auth_page'))
+
+    try:
         if 'error' in query_params:
             error = query_params['error'][0]
             flash('error', f'Spotify authentication failed: {error}')
@@ -510,20 +598,30 @@ def process_callback_url():
         if 'code' not in query_params:
             flash('error', 'No authorization code found in the URL.')
             return redirect(url_for('spotify_auth_page'))
-        code = query_params['code'][0]
+        
+        port = request.host.split(':')[-1] if ':' in request.host else '5000'
+        redirect_uri = f"http://127.0.0.1:{port}/callback"
+        
+        logger.info(f"Attempting Spotify authentication with redirect URI: {redirect_uri}")
+        code = query_params.get('code')[0]
+        logger.info(f"Received Spotify authorization code starting with: {code[:10]}...")
         sp_oauth = SpotifyOAuth(
             client_id=config["api_keys"]["client_id"],
             client_secret=config["api_keys"]["client_secret"],
-            redirect_uri=config["api_keys"]["redirect_uri"],
+            redirect_uri=redirect_uri,
             scope="user-read-currently-playing",
             cache_path=".spotify_cache"
         )
+        logger.info("Requesting access token from Spotify...")
         token_info = sp_oauth.get_access_token(code)
         if token_info:
+            logger.info("✅ Spotify authentication successful! Token received.")
             flash('success', 'Spotify authentication successful!')
         else:
+            logger.error("❌ Spotify authentication failed: get_access_token returned no token.")
             flash('error', 'Spotify authentication failed.')
     except Exception as e:
+        logger.error(f"❌ Exception during Spotify token exchange: {str(e)}")
         flash('error', f'Authentication error: {str(e)}')
         if os.path.exists(".spotify_cache"):
             os.remove(".spotify_cache")
@@ -675,6 +773,13 @@ def advanced_config():
 @app.route('/save_advanced_config', methods=['POST'])
 def save_advanced_config():
     config = load_config()
+
+    # API Keys (were missing from this handler)
+    config["api_keys"]["openweather"] = request.form.get('openweather', '')
+    config["api_keys"]["client_id"] = request.form.get('client_id', '')
+    config["api_keys"]["client_secret"] = request.form.get('client_secret', '')
+    config["api_keys"]["google_geo"] = request.form.get('google_geo', '')
+
     try:
         config["display"]["type"] = request.form.get('display_type', 'framebuffer')
         config["display"]["framebuffer"] = request.form.get('framebuffer_device', '/dev/fb1')
@@ -711,8 +816,7 @@ def save_advanced_config():
         config["settings"]["start_screen"] = request.form.get('start_screen', 'weather')
         config["settings"]["use_gpsd"] = 'use_gpsd' in request.form
         config["settings"]["use_google_geo"] = 'use_google_geo' in request.form
-        config["settings"]["enable_current_track_display"] = 'enable_current_track_display' in request.form
-        config["api_keys"]["redirect_uri"] = request.form.get('redirect_uri', 'http://127.0.0.1:5000')
+        config["settings"]["enable_current_track_display"] = 'enable_current_track_display' in request.form        
         config["clock"]["background"] = request.form.get('clock_background', 'color')
         config["clock"]["color"] = request.form.get('clock_color', '#000000')
         config["clock"]["type"] = request.form.get('clock_type', 'digital')
@@ -999,32 +1103,27 @@ def main():
     import logging as pylogging
     log = pylogging.getLogger('werkzeug')
     log.setLevel(pylogging.WARNING)
-    ports = [5000, 5001, 5002, 5003]
-    chosen_port = None
-    for port in ports:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('0.0.0.0', port))
-            chosen_port = port
-            if lan_ips:
-                for ip in lan_ips:
-                    logger.info(f"📍 Web UI available at: http://{ip}:{chosen_port}")
-            else:
-                logger.info(f"📍 Web UI available at: http://127.0.0.1:{chosen_port}")
-            logger.info("⏹️  Press Ctrl+C to stop the launcher")
-            sys.stdout = open(os.devnull, 'w')
-            sys.stderr = open(os.devnull, 'w')
-            app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-            app.run(host='0.0.0.0', port=chosen_port, debug=False, use_reloader=False)
-            break
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logger.debug(f"Port {port} is busy, trying next...")
-                continue
-            else:
-                raise
-    if chosen_port is None:
-        logger.error("❌ Could not find an available port. All ports 5000-5003 are busy.")
+    port = 5000
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('0.0.0.0', port))
+        s.close()
+        if lan_ips:
+            for ip in lan_ips:
+                logger.info(f"📍 Web UI available at: http://{ip}:{port}")
+        else:
+            logger.info(f"📍 Web UI available at: http://127.0.0.1:{port}")
+        logger.info("⏹️  Press Ctrl+C to stop the launcher")
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = open(os.devnull, 'w')
+        app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except OSError as e:
+        if "Address already in use" in str(e):
+            logger.error(f"❌ Port {port} is already in use. Please stop the other application using it.")
+        else:
+            logger.error(f"❌ Failed to start web server: {e}")
         cleanup()
 
 if __name__ == '__main__':

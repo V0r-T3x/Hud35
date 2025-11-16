@@ -126,6 +126,7 @@ scrolling_text_cache = {}
 last_display_time = 0
 waveshare_lock = RLock()
 file_write_lock = threading.Lock()
+display_lock = RLock()
 
 def load_config(path="config.toml"):
     if not os.path.exists(path):
@@ -154,41 +155,6 @@ def load_config(path="config.toml"):
             toml.dump(DEFAULT_CONFIG, f)
         return DEFAULT_CONFIG.copy()
 
-config = load_config()
-if config["display"]["type"] == "waveshare_epd":
-    HAS_WAVESHARE_EPD = True
-if config["display"]["type"] == "waveshare_epd":
-    try:
-        import st7789
-        HAS_ST7789 = True
-    except ImportError:
-        HAS_ST7789 = False
-LARGE_FONT = ImageFont.truetype(config["fonts"]["large_font_path"], config["fonts"]["large_font_size"])
-MEDIUM_FONT = ImageFont.truetype(config["fonts"]["medium_font_path"], config["fonts"]["medium_font_size"])
-SMALL_FONT = ImageFont.truetype(config["fonts"]["small_font_path"], config["fonts"]["small_font_size"])
-SPOT_LARGE_FONT = ImageFont.truetype(config["fonts"]["spot_large_font_path"], config["fonts"]["spot_large_font_size"])
-SPOT_MEDIUM_FONT = ImageFont.truetype(config["fonts"]["spot_medium_font_path"], config["fonts"]["spot_medium_font_size"])
-SPOT_SMALL_FONT = ImageFont.truetype(config["fonts"]["spot_small_font_path"], config["fonts"]["spot_small_font_size"])
-OPENWEATHER_API_KEY = config["api_keys"]["openweather"]
-GOOGLE_GEO_API_KEY = config["api_keys"]["google_geo"]
-SPOTIFY_CLIENT_ID = config["api_keys"]["client_id"]
-SPOTIFY_CLIENT_SECRET = config["api_keys"]["client_secret"]
-REDIRECT_URI = config["api_keys"]["redirect_uri"]
-START_SCREEN = config["settings"]["start_screen"]
-FALLBACK_CITY = config["settings"]["fallback_city"]
-USE_GPSD = config["settings"]["use_gpsd"]
-USE_GOOGLE_GEO = config["settings"]["use_google_geo"]
-TIME_DISPLAY = config["settings"]["time_display"]
-PROGRESSBAR_DISPLAY = config["settings"]["progressbar_display"]
-ENABLE_CURRENT_TRACK_DISPLAY = config["settings"]["enable_current_track_display"]
-FRAMEBUFFER = config["settings"]["framebuffer"]
-BUTTON_A = config["buttons"]["button_a"]
-BUTTON_B = config["buttons"]["button_b"]
-BUTTON_X = config["buttons"]["button_x"]
-BUTTON_Y = config["buttons"]["button_y"]
-CLOCK_TYPE = config["clock"]["type"]
-CLOCK_BACKGROUND = config["clock"]["background"]
-CLOCK_COLOR = config["clock"].get("color", "black")
 MIN_DISPLAY_INTERVAL = 0.001
 DEBOUNCE_TIME = 0.3
 
@@ -969,7 +935,13 @@ def initialize_spotify_client():
             except:
                 pass
     try:
-        sp_oauth = setup_spotify_oauth()
+        sp_oauth = SpotifyOAuth(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=f"http://127.0.0.1:5000/callback",
+            scope=SCOPE,
+            cache_path=".spotify_cache"
+        )
         test_token = sp_oauth.get_cached_token()
         if not test_token:
             return None
@@ -1027,11 +999,15 @@ def initialize_spotify_client():
 def authenticate_spotify_interactive():
     print("\n" + "="*60)
     print("Spotify Authentication Required")
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        print("❌ Spotify Client ID/Secret not configured. Please set them in the web UI.")
+        print("="*60)
+        return None
     print("="*60)
     sp_oauth = SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=f"http://127.0.0.1:5000/callback",
         scope=SCOPE,
         cache_path=".spotify_cache"
     )
@@ -1061,7 +1037,7 @@ def check_and_refresh_token(current_sp):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            sp_oauth = setup_spotify_oauth()
+            sp_oauth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=f"http://127.0.0.1:5000/callback", scope=SCOPE, cache_path=".spotify_cache")
             token_info = sp_oauth.get_cached_token()
             if not token_info:
                 return current_sp
@@ -1122,7 +1098,7 @@ def spotify_loop():
                     sp_oauth = SpotifyOAuth(
                         client_id=SPOTIFY_CLIENT_ID,
                         client_secret=SPOTIFY_CLIENT_SECRET,
-                        redirect_uri=REDIRECT_URI,
+                        redirect_uri=f"http://127.0.0.1:5000/callback",
                         scope=SCOPE,
                         cache_path=".spotify_cache"
                     )
@@ -1396,21 +1372,28 @@ def animate_images():
             new_x = x + (dx * frame_time * 60 * speed_factor * step_multiplier)
             new_y = y + (dy * frame_time * 60 * speed_factor * step_multiplier)
             new_dx, new_dy = dx, dy
-            bounced = False
-            if new_x <= 0 or new_x + w >= SCREEN_WIDTH:
+            bounced = False # Initialize bounced flag
+            if new_x < 0:
+                new_x = -new_x
                 new_dx = -dx
-                new_x = max(0.0, min(new_x, float(SCREEN_WIDTH - w)))
                 bounced = True
-            if new_y <= 0 or new_y + h >= SCREEN_HEIGHT:
+            elif new_x + w > SCREEN_WIDTH:
+                new_x = SCREEN_WIDTH - w - (new_x + w - SCREEN_WIDTH)
+                new_dx = -dx
+                bounced = True
+            if new_y < 0:
+                new_y = -new_y
                 new_dy = -dy
-                new_y = max(0.0, min(new_y, float(SCREEN_HEIGHT - h)))
+                bounced = True
+            elif new_y + h > SCREEN_HEIGHT:
+                new_y = SCREEN_HEIGHT - h - (new_y + h - SCREEN_HEIGHT)
+                new_dy = -dy
                 bounced = True
             with artist_image_lock:
                 artist_pos[:] = [new_x, new_y]
                 artist_velocity[:] = [new_dx, new_dy]
             if bounced and random.random() < 0.5:
                 artist_on_top = not artist_on_top
-                needs_update = True
             needs_update = True
         if needs_update and START_SCREEN == "spotify":
             update_display()
@@ -1418,6 +1401,7 @@ def animate_images():
 
 def init_st7789_display():
     global st7789_display
+    print("ℹ️ [Display] Initializing ST7789 display...")
     if not HAS_ST7789: return None
     try:
         st7789_config = config["display"].get("st7789", {})
@@ -1432,24 +1416,32 @@ def init_st7789_display():
             rotation=config_rotation,
             spi_speed_hz=st7789_config.get("spi_speed", 60000000)
         )
-        print(f"ST7789 display initialized with rotation: {config_rotation}°")
+        print(f"✅ [Display] ST7789 display initialized with rotation: {config_rotation}°")
         return st7789_display
     except Exception as e:
-        print(f"ST7789 init failed: {e}")
+        print(f"❌ [Display] ST7789 init failed: {e}")
         return None
 
 def display_image_on_st7789(image):
     global st7789_display
     try:
         if st7789_display is None:
+            print("⚠️ [Display] ST7789: Display object is None, attempting re-initialization.")
             st7789_display = init_st7789_display()
-            if st7789_display is None: return
-        scaled_image = image.resize((320, 240), Image.BILINEAR)
-        if scaled_image.mode != "RGB": 
-            scaled_image = scaled_image.convert("RGB")
-        st7789_display.display(scaled_image)
+            if st7789_display is None:
+                print("❌ [Display] ST7789: Re-initialization failed. Aborting frame.")
+                return
+        display_width = st7789_display.width
+        display_height = st7789_display.height
+        if image.size != (display_width, display_height):
+            scaled_image = image.resize((display_width, display_height), Image.BILINEAR)
+        else:
+            scaled_image = image
+        rgb_image = Image.new("RGB", (display_width, display_height))
+        rgb_image.paste(scaled_image.convert("RGB"))
+        st7789_display.display(rgb_image)
     except Exception as e:
-        print(f"ST7789 display error: {e}")
+        print(f"❌ [Display] ST7789 display error: {e}. Falling back to framebuffer.")
         display_image_on_original_fb(image)
 
 def display_image_on_original_fb(image):
@@ -1717,21 +1709,23 @@ def display_image_on_waveshare(image):
                 print(f"Failed to reset waveshare display: {e2}")
 
 def display_image_on_framebuffer(image):
-    global last_display_time
+    global last_display_time, MIN_DISPLAY_INTERVAL
     now = time.time()
     if now - last_display_time < MIN_DISPLAY_INTERVAL: 
         return
     last_display_time = now
-    display_type = config.get("display", {}).get("type", "framebuffer")
-    if display_type == "st7789" and HAS_ST7789:
-        display_image_on_st7789(image)
-    elif display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
-        display_image_on_waveshare(image)
-    else:
-        display_image_on_original_fb(image)
+    with display_lock:
+        display_type = config.get("display", {}).get("type", "framebuffer")
+        if display_type == "st7789" and HAS_ST7789:
+            display_image_on_st7789(image)
+        elif display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
+            display_image_on_waveshare(image)
+        else:
+            display_image_on_original_fb(image)
 
 def update_display():
     global START_SCREEN
+    global MIN_DISPLAY_INTERVAL
     display_type = config.get("display", {}).get("type", "framebuffer")
     if display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
         img = draw_waveshare_simple(weather_info, spotify_track)
@@ -1744,6 +1738,7 @@ def update_display():
             img = draw_clock_image()
         else:
             img = draw_clock_image()
+    MIN_DISPLAY_INTERVAL = 1.0 / 30.0
     display_image_on_framebuffer(img)
 
 def clear_framebuffer():
@@ -1790,9 +1785,50 @@ def capture_frames_background():
         time.sleep(0.5)
     print("⏹️ Capture complete.")
 
+def reload_config():
+    global config, HAS_WAVESHARE_EPD, st7789, HAS_ST7789, LARGE_FONT, MEDIUM_FONT, SMALL_FONT
+    global SPOT_LARGE_FONT, SPOT_MEDIUM_FONT, SPOT_SMALL_FONT, OPENWEATHER_API_KEY
+    global GOOGLE_GEO_API_KEY, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, REDIRECT_URI
+    global START_SCREEN, FALLBACK_CITY, USE_GPSD, USE_GOOGLE_GEO, TIME_DISPLAY
+    global PROGRESSBAR_DISPLAY, ENABLE_CURRENT_TRACK_DISPLAY, FRAMEBUFFER, BUTTON_A
+    global BUTTON_B, BUTTON_X, BUTTON_Y, CLOCK_TYPE, CLOCK_BACKGROUND, CLOCK_COLOR
+
+    config = load_config()
+    HAS_WAVESHARE_EPD = config["display"]["type"] == "waveshare_epd"
+    try:
+        import st7789
+        HAS_ST7789 = True
+    except ImportError:
+        HAS_ST7789 = False
+
+    LARGE_FONT = ImageFont.truetype(config["fonts"]["large_font_path"], config["fonts"]["large_font_size"])
+    MEDIUM_FONT = ImageFont.truetype(config["fonts"]["medium_font_path"], config["fonts"]["medium_font_size"])
+    SMALL_FONT = ImageFont.truetype(config["fonts"]["small_font_path"], config["fonts"]["small_font_size"])
+    SPOT_LARGE_FONT = ImageFont.truetype(config["fonts"]["spot_large_font_path"], config["fonts"]["spot_large_font_size"])
+    SPOT_MEDIUM_FONT = ImageFont.truetype(config["fonts"]["spot_medium_font_path"], config["fonts"]["spot_medium_font_size"])
+    SPOT_SMALL_FONT = ImageFont.truetype(config["fonts"]["spot_small_font_path"], config["fonts"]["spot_small_font_size"])
+
+    OPENWEATHER_API_KEY = config["api_keys"]["openweather"]
+    GOOGLE_GEO_API_KEY = config["api_keys"]["google_geo"]
+    SPOTIFY_CLIENT_ID = config["api_keys"]["client_id"]
+    SPOTIFY_CLIENT_SECRET = config["api_keys"]["client_secret"]
+    REDIRECT_URI = config["api_keys"]["redirect_uri"]
+
+    START_SCREEN = config["settings"]["start_screen"]
+    FALLBACK_CITY = config["settings"]["fallback_city"]
+    USE_GPSD = config["settings"]["use_gpsd"]
+    USE_GOOGLE_GEO = config["settings"]["use_google_geo"]
+    TIME_DISPLAY = config["settings"]["time_display"]
+    PROGRESSBAR_DISPLAY = config["settings"]["progressbar_display"]
+    ENABLE_CURRENT_TRACK_DISPLAY = config["settings"].get("enable_current_track_display", True)
+    FRAMEBUFFER = config["display"]["framebuffer"]
+    BUTTON_A, BUTTON_B, BUTTON_X, BUTTON_Y = (config["buttons"]["button_a"], config["buttons"]["button_b"], config["buttons"]["button_x"], config["buttons"]["button_y"])
+    CLOCK_TYPE, CLOCK_BACKGROUND, CLOCK_COLOR = (config["clock"]["type"], config["clock"]["background"], config["clock"].get("color", "black"))
+
 def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    reload_config()
     Thread(target=background_generation_worker, daemon=True).start()
     Thread(target=weather_loop, daemon=True).start()
     Thread(target=spotify_loop, daemon=True).start()
@@ -1803,9 +1839,7 @@ def main():
     #Thread(target=capture_frames_background, daemon=True).start()
     update_display()
     try:
-        while not exit_event.is_set():
-            update_display()
-            time.sleep(0.1)
+        exit_event.wait()
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
