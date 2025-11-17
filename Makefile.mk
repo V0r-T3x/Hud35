@@ -20,6 +20,9 @@ PYTHON_EXECUTABLE ?= python3
 # System dependencies from README.md and install.sh
 DEPS := git python3-pip python3-evdev python3-numpy python3-pil python3-flask python3-toml fonts-dejavu-core python3-rpi.gpio
 
+# Optional dependencies for Waveshare E-Paper displays
+WAVESHARE_DEPS := libjpeg-dev zlib1g-dev libpng-dev libfreetype6-dev liblcms2-dev libwebp-dev libtiff-dev libopenjp2-7-dev libxcb1-dev
+
 # Use .DEFAULT_GOAL to make `help` the default action.
 .DEFAULT_GOAL := help
 
@@ -78,13 +81,15 @@ setup-dirs:
 setup-app:
 	@echo "---> Copying application files to $(APP_DIR)..."
 	sudo rsync -a --delete --exclude='.git' --exclude='*.pyc' --exclude='__pycache__' --exclude='.venv' --exclude='Makefile.mk' ./ $(APP_DIR)/
+	@echo "---> Copying configuration helper script..."
+	sudo cp set_config.py $(APP_DIR)/
 	@echo "---> Setting application file permissions..."
 	sudo chown -R $(APP_USER):$(APP_USER) $(APP_DIR)
 	@echo "---> Creating Python virtual environment at $(VENV_DIR)..."
 	sudo -u $(APP_USER) $(PYTHON_EXECUTABLE) -m venv --system-site-packages $(VENV_DIR)
-	@echo "---> Installing Python dependencies from requirements.txt..."
-	sudo $(VENV_DIR)/bin/pip install --upgrade pip
-	sudo $(VENV_DIR)/bin/pip install -r $(APP_DIR)/requirements.txt
+	@echo "---> Installing Python dependencies into virtual environment..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/pip install --upgrade pip
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/pip install -r $(APP_DIR)/requirements.txt
 
 setup-service:
 	@echo "---> Creating and enabling systemd service for Hud35..."
@@ -123,11 +128,104 @@ uninstall-app:
 	-sudo rm -rf $(APP_DIR)
 	-sudo rm -rf $(LOG_DIR)
 
+##@ Configuration
+
+configure: ## Run an interactive wizard to configure API keys and display.
+	$(eval SHELL:=/bin/bash)
+	@echo "--- Starting Hud35 Interactive Setup Wizard ---"
+	@echo "This will guide you through setting up API keys and your display."
+	@echo "Press [Enter] to skip any setting."
+	@echo ""
+	@# --- API Key Configuration ---
+	@read -p "Enter your OpenWeatherMap API Key: " OWM_API_KEY; \
+	if [ -n "$$OWM_API_KEY" ]; then \
+		echo "---> Setting OpenWeatherMap API Key..."; \
+		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml api_keys openweather "$$OWM_API_KEY"; \
+	fi
+	@read -p "Enter your Google Geolocation API Key: " GOOGLE_API_KEY; \
+	if [ -n "$$GOOGLE_API_KEY" ]; then \
+		echo "---> Setting Google Geolocation API Key..."; \
+		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml api_keys google_geo "$$GOOGLE_API_KEY"; \
+	fi
+	@read -p "Enter your Spotify Client ID: " SPOTIFY_CLIENT_ID; \
+	if [ -n "$$SPOTIFY_CLIENT_ID" ]; then \
+		echo "---> Setting Spotify Client ID..."; \
+		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml api_keys client_id "$$SPOTIFY_CLIENT_ID"; \
+	fi
+	@read -p "Enter your Spotify Client Secret: " SPOTIFY_CLIENT_SECRET; \
+	if [ -n "$$SPOTIFY_CLIENT_SECRET" ]; then \
+		echo "---> Setting Spotify Client Secret..."; \
+		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml api_keys client_secret "$$SPOTIFY_CLIENT_SECRET"; \
+	fi
+	@echo ""
+	@# --- Display Configuration ---
+	@echo "Select your display type:"
+	@echo "  1) Display HAT Mini (st7789)"
+	@echo "  2) 3.5\" TFT Framebuffer (e.g., ILI9486)"
+	@echo "  3) Waveshare E-Paper Display"
+	@read -p "Enter the number for your display [1-3]: " -n 1 -r; \
+	echo ""; \
+	case $$REPLY in \
+		1) echo "Selected Display HAT Mini. Installing..."; $(MAKE) install-st7789 ;; \
+		2) \
+			echo "Selected 3.5\" TFT Framebuffer. Installing..."; \
+			read -p "Enter framebuffer device number (0 or 1) [default: 1]: " FB_NUM; \
+			FB_NUM=$${FB_NUM:-1}; \
+			sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display framebuffer "/dev/fb$$FB_NUM"; \
+			$(MAKE) install-framebuffer-3.5; \
+			;; \
+		3) echo "Selected Waveshare E-Paper. Installing..."; $(MAKE) install-waveshare-epd ;; \
+		*) echo "Invalid selection. Skipping display setup." ;; \
+	esac
+	@echo ""
+	@# --- Screen Rotation ---
+	@read -p "Enter screen rotation (0, 90, 180, 270) [default: 0]: " ROTATION; \
+	ROTATION=$${ROTATION:-0}; \
+	if [[ "$$ROTATION" =~ ^(0|90|180|270)$$ ]]; then \
+		echo "---> Setting screen rotation to $$ROTATION..."; \
+		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display rotation "$$ROTATION"; \
+	else \
+		echo "⚠️ Invalid rotation value '$$ROTATION'. Skipping rotation setup."; \
+	fi
+	@echo "\n✅ Interactive configuration complete."
+	@echo "   Spotify authentication must be completed via the web interface."
+
+install-framebuffer-3.5: ## Install drivers for 3.5" TFT (framebuffer) displays.
+	@echo "---> Installing drivers for 3.5 inch TFT display as per README.md..."
+	rm -rf LCD-show
+	git clone https://github.com/Shinigamy19/RaspberryPi3bplus-3.5inch-displayA-ILI9486-MPI3501-XPT2046
+	mv RaspberryPi3bplus-3.5inch-displayA-ILI9486-MPI3501-XPT2046 LCD-show
+	cd LCD-show && chmod +x LCD35-show && sudo ./LCD35-show
+	@echo "---> Configuring screen type to 'framebuffer' in config.toml..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display width 480
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display height 320
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display type framebuffer
+	@echo "✅ 3.5 inch TFT driver installation script executed."
+	@echo "   A reboot is required to activate the display driver."
+
+install-waveshare-epd: ## Install Python driver for Waveshare E-Paper displays.
+	@echo "---> Installing system libraries for Waveshare E-Paper (Pillow dependencies)..."
+	sudo apt-get install -y $(WAVESHARE_DEPS)
+	@echo "---> Installing eink-wave driver into virtual environment..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/pip install eink-wave
+	@echo "---> Configuring screen type to 'waveshare_epd' in config.toml..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display type waveshare_epd
+	@echo "✅ Waveshare E-Paper driver installed."
+
 ##@ Display Drivers
 
 install-st7789: ## Install Python driver for ST7789 displays (Display HAT Mini).
 	@echo "---> Installing ST7789 driver into virtual environment..."
-	sudo $(VENV_DIR)/bin/pip install st7789
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/pip install st7789
+	@echo "---> Configuring screen type to 'st7789' in config.toml..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display type st7789
+	@echo "---> Setting default configuration for [display.st7789]..."
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 spi_port 0
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 spi_cs 1
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 dc_pin 9
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 backlight_pin 13
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 rotation 0
+	sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display.st7789 spi_speed 60000000
 	@echo "✅ ST7789 driver installed."
 
 ##@ Service Management
