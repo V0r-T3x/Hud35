@@ -50,6 +50,7 @@ install: install-deps setup-spi setup-user setup-dirs setup-app setup-service ##
 	@echo "   Service '$(PROJECT_NAME).service' is enabled and started."
 	@echo "\n   🚨 IMPORTANT: A system reboot is required for hardware permissions to take effect."
 	@echo "   Run 'make status' to check the application status."
+	@echo "   Run 'make configure' to configure api keys and setup display."
 
 install-deps:
 	@echo "---> Updating package lists and installing system dependencies..."
@@ -163,30 +164,31 @@ configure: ## Run an interactive wizard to configure API keys and display.
 	@echo "  1) Display HAT Mini (st7789)"
 	@echo "  2) 3.5\" TFT Framebuffer (e.g., ILI9486)"
 	@echo "  3) Waveshare E-Paper Display"
-	@read -p "Enter the number for your display [1-3]: " -n 1 -r; \
-	echo ""; \
-	case $$REPLY in \
-		1) echo "Selected Display HAT Mini. Installing..."; $(MAKE) install-st7789 ;; \
-		2) \
-			echo "Selected 3.5\" TFT Framebuffer. Installing..."; \
-			read -p "Enter framebuffer device number (0 or 1) [default: 1]: " FB_NUM; \
-			FB_NUM=$${FB_NUM:-1}; \
-			sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display framebuffer "/dev/fb$$FB_NUM"; \
-			$(MAKE) install-framebuffer-3.5; \
-			;; \
-		3) echo "Selected Waveshare E-Paper. Installing..."; $(MAKE) install-waveshare-epd ;; \
-		*) echo "Invalid selection. Skipping display setup." ;; \
-	esac
-	@echo ""
-	@# --- Screen Rotation ---
-	@read -p "Enter screen rotation (0, 90, 180, 270) [default: 0]: " ROTATION; \
-	ROTATION=$${ROTATION:-0}; \
-	if [[ "$$ROTATION" =~ ^(0|90|180|270)$$ ]]; then \
-		echo "---> Setting screen rotation to $$ROTATION..."; \
-		sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display rotation "$$ROTATION"; \
+	@read -p "Enter the number for your display [1-3]: " DISPLAY_CHOICE; \
+	if [[ "$$DISPLAY_CHOICE" =~ ^[1-3]$$ ]]; then \
+		read -p "Enter screen rotation (0, 180) [default: 0]: " ROTATION; \
+		ROTATION=$${ROTATION:-0}; \
+		if [[ "$$ROTATION" =~ ^(0|180)$$ ]]; then \
+			echo "---> Setting screen rotation to $$ROTATION..."; \
+			sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display rotation "$$ROTATION"; \
+		else \
+			echo "⚠️ Invalid rotation value '$$ROTATION'. Skipping rotation setup."; \
+		fi; \
+		echo ""; \
+		case $$DISPLAY_CHOICE in \
+			1) echo "Selected Display HAT Mini. Installing..."; $(MAKE) install-st7789 ;; \
+			2) \
+				echo "Selected 3.5\" TFT Framebuffer. Installing..."; \
+				read -p "Enter framebuffer device number (0 or 1) [default: 1]: " FB_NUM; \
+				FB_NUM=$${FB_NUM:-1}; \
+				sudo -u $(APP_USER) $(VENV_DIR)/bin/python3 $(APP_DIR)/set_config.py $(APP_DIR)/config.toml display framebuffer "/dev/fb$$FB_NUM"; \
+				$(MAKE) install-framebuffer-3.5; \
+				;; \
+			3) echo "Selected Waveshare E-Paper. Installing..."; $(MAKE) install-waveshare-epd ;; \
+		esac; \
 	else \
-		echo "⚠️ Invalid rotation value '$$ROTATION'. Skipping rotation setup."; \
-	fi
+		echo "Invalid selection. Skipping display setup."; \
+	fi;
 	@echo "\n✅ Interactive configuration complete."
 	@echo "   Spotify authentication must be completed via the web interface."
 

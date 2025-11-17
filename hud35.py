@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-import time, requests, json, evdev, spotipy, colorsys, datetime, os, subprocess, toml, random, sys, copy, math, queue, threading, signal
-import  numpy as np
+import time, requests, json, evdev, spotipy, colorsys, datetime, os, subprocess, toml, random, sys, copy, math, queue, threading, signal, numpy as np
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageStat, ImageColor
 from threading import Thread, Event, RLock
@@ -12,15 +11,15 @@ except ImportError:
     HAS_GPIO = False
 sys.stdout.reconfigure(line_buffering=True)
 
-SCREEN_WIDTH = 480
-SCREEN_HEIGHT = 320
+SCREEN_WIDTH = None
+SCREEN_HEIGHT = None
+SCREEN_AREA = None
 UPDATE_INTERVAL_WEATHER = 3600
 GEO_UPDATE_INTERVAL = 3600
 SPOTIFY_UPDATE_INTERVAL = 1
 SCOPE = "user-read-currently-playing"
 USE_GPSD = True
 USE_GOOGLE_GEO = True
-SCREEN_AREA = SCREEN_WIDTH * SCREEN_HEIGHT
 BG_DIR = "./bg"
 CLOCK_TYPE = "analog"
 CLOCK_BACKGROUND = "color"
@@ -29,6 +28,8 @@ CLOCK_COLOR = "black"
 DEFAULT_CONFIG = {
     "display": {
         "type": "st7789",
+        "width": 480,
+        "height": 320,
         "framebuffer": "/dev/fb1",
         "rotation": 0,
         "st7789": {
@@ -116,15 +117,16 @@ album_art_image = None
 artist_image = None
 scroll_state = {"title": {"offset": 0, "max_offset": 0, "active": False}, "artists": {"offset": 0, "max_offset": 0, "active": False}, "album": {"offset": 0, "max_offset": 0, "active": False}}
 bg_map = {"Clear": "bg_clear.png", "Clouds": "bg_clouds.png", "Rain": "bg_rain.png", "Drizzle": "bg_drizzle.png", "Thunderstorm": "bg_storm.png", "Snow": "bg_snow.png", "Mist": "bg_mist.png", "Fog": "bg_fog.png", "Haze": "bg_haze.png", "Smoke": "bg_smoke.png", "Dust": "bg_dust.png", "Sand": "bg_sand.png", "Ash": "bg_ash.png", "Squall": "bg_squall.png", "Tornado": "bg_tornado.png"}
-art_pos = [float(SCREEN_WIDTH - 155), float(SCREEN_HEIGHT - 155)]
-artist_pos = [5, float(SCREEN_HEIGHT - 105)]
+art_pos = [0.0, 0.0]
+artist_pos = [0.0, 0.0]
 artist_velocity = [0.7, 0.7]
-art_velocity = [1, 1]
+art_velocity = [1.0, 1.0]
 artist_on_top = False
 spotify_layout_cache = None
 scrolling_text_cache = {}
 last_display_time = 0
 waveshare_lock = RLock()
+BG_DIR = "./bg"
 file_write_lock = threading.Lock()
 display_lock = RLock()
 
@@ -155,7 +157,8 @@ def load_config(path="config.toml"):
             toml.dump(DEFAULT_CONFIG, f)
         return DEFAULT_CONFIG.copy()
 
-MIN_DISPLAY_INTERVAL = 0.001
+#MIN_DISPLAY_INTERVAL = 0.001
+MIN_DISPLAY_INTERVAL = 0.05
 DEBOUNCE_TIME = 0.3
 
 def get_cached_bg(bg_path, size):
@@ -538,6 +541,10 @@ def draw_spotify_image(spotify_track):
     if bg_to_use is None:
         bg_to_use = get_cached_background((SCREEN_WIDTH, SCREEN_HEIGHT), art_img)
     img = bg_to_use
+
+    overlay = Image.new("RGBA", (SCREEN_WIDTH, SCREEN_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
     if spotify_track and 'main_color' in spotify_track and 'secondary_color' in spotify_track:
         main_color = spotify_track['main_color']
         secondary_color = spotify_track['secondary_color']
@@ -546,6 +553,36 @@ def draw_spotify_image(spotify_track):
             main_color, secondary_color = get_contrasting_colors(album_art_image)
         else:
             main_color, secondary_color = (0, 255, 0), (0, 255, 255)
+
+    layout = spotify_layout_cache
+    if layout:
+        for item in layout:
+            bg_width = min(item['label_width'] + 6 + item['text_width'] + 6, SCREEN_WIDTH - 5 - 5)
+            draw.rectangle([5, item['y'], 5 + bg_width, item['y'] + item['field_height']], fill=(0,0,0,200))
+            draw.text((5, item['y'] + 4), item['label'], fill=secondary_color, font=SPOT_MEDIUM_FONT)
+            if item['needs_scroll']:
+                scrolling_img = scrolling_text_cache.get(item['key'])
+                if scrolling_img:
+                    offset = scroll_state[item['key']]["offset"]
+                    crop_x = offset % (item['text_width'] + 50)
+                    cropped = scrolling_img.crop((crop_x, 0, crop_x + item['visible_width'], item['field_height']))
+                    draw.rectangle([item['left_boundary'], item['y'], item['left_boundary'] + item['visible_width'], item['y'] + item['field_height']], fill=(0,0,0,200))
+                    overlay.paste(cropped, (item['left_boundary'], item['y']), cropped)
+                else:
+                    draw.text((item['left_boundary'], item['y'] + 4), item['data'], fill=main_color, font=SPOT_MEDIUM_FONT)
+            else:
+                draw.text((item['left_boundary'], item['y'] + 4), item['data'], fill=main_color, font=SPOT_MEDIUM_FONT)
+
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    if spotify_track and 'main_color' in spotify_track and 'secondary_color' in spotify_track:
+        main_color = spotify_track['main_color']
+        secondary_color = spotify_track['secondary_color']
+    else:
+        if album_art_image:
+            main_color, secondary_color = get_contrasting_colors(album_art_image)
+        else:
+            main_color, secondary_color = (0, 255, 0), (0, 255, 255)
+
     album_img_to_draw = None
     artist_img_to_draw = None
     album_pos = None
@@ -582,36 +619,14 @@ def draw_spotify_image(spotify_track):
     else:
         if artist_img_to_draw and artist_pos_to_draw: img.paste(artist_img_to_draw, artist_pos_to_draw)
         if album_img_to_draw and album_pos: img.paste(album_img_to_draw, album_pos)
-    overlay = Image.new("RGBA", (SCREEN_WIDTH, SCREEN_HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    layout = spotify_layout_cache
-    if layout:
-        for item in layout:
-            bg_width = min(item['label_width'] + 6 + item['text_width'] + 6, SCREEN_WIDTH - 5 - 5)
-            draw.rectangle([5, item['y'], 5 + bg_width, item['y'] + item['field_height']], fill=(0,0,0,200))
-            draw.text((5, item['y'] + 4), item['label'], fill=secondary_color, font=SPOT_MEDIUM_FONT)
-            if item['needs_scroll']:
-                scrolling_img = scrolling_text_cache.get(item['key'])
-                if scrolling_img:
-                    offset = scroll_state[item['key']]["offset"]
-                    crop_x = offset % (item['text_width'] + 50)
-                    cropped = scrolling_img.crop((crop_x, 0, crop_x + item['visible_width'], item['field_height']))
-                    draw.rectangle([item['left_boundary'], item['y'], item['left_boundary'] + item['visible_width'], item['y'] + item['field_height']], fill=(0,0,0,200))
-                    overlay.paste(cropped, (item['left_boundary'], item['y']), cropped)
-                else:
-                    draw.text((item['left_boundary'], item['y'] + 4), item['data'], fill=main_color, font=SPOT_MEDIUM_FONT)
-            else:
-                draw.text((item['left_boundary'], item['y'] + 4), item['data'], fill=main_color, font=SPOT_MEDIUM_FONT)
-    else:
-        img = Image.new("RGB", (SCREEN_WIDTH, SCREEN_HEIGHT), "black")
+
+    if not spotify_track:
         if os.path.exists(os.path.join(BG_DIR, "no_track.png")):
             bg_path = os.path.join(BG_DIR, "no_track.png")
             bg_img = get_cached_bg(bg_path, (SCREEN_WIDTH, SCREEN_HEIGHT))
             img.paste(bg_img, (0, 0))
-        error_text = "No track playing"
-        bbox = get_cached_text_bbox(error_text, MEDIUM_FONT)
-        draw.rectangle([5, 5, min(bbox[2]+11, SCREEN_WIDTH-5), bbox[3]+9], fill=(0,0,0,200))
-        draw.text((11, 9), error_text, fill="red", font=MEDIUM_FONT)
+    overlay = Image.new("RGBA", (SCREEN_WIDTH, SCREEN_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
     if PROGRESSBAR_DISPLAY:
         progress_bar_height = 10
         border_width = 2
@@ -1446,20 +1461,11 @@ def display_image_on_st7789(image):
 
 def display_image_on_original_fb(image):
     try:
-        rotation = config["display"].get("rotation", 0)
-        if rotation == 180:
-            rotated_image = image.rotate(180, expand=False)
-        else:
-            rotated_image = image.rotate(rotation, expand=True)
-        if rotated_image.mode != "RGB": 
-            rotated_image = rotated_image.convert("RGB")
-        if rotated_image.size != (SCREEN_WIDTH, SCREEN_HEIGHT):
-            full_img = Image.new("RGB", (SCREEN_WIDTH, SCREEN_HEIGHT), "black")
-            x = (SCREEN_WIDTH - rotated_image.width) // 2
-            y = (SCREEN_HEIGHT - rotated_image.height) // 2
-            full_img.paste(rotated_image, (x, y))
-            rotated_image = full_img
-        arr = np.array(rotated_image, dtype=np.uint8)
+        # Ensure the image is the correct size and mode for the framebuffer.
+        # The display driver (e.g., LCD35-show) handles the rotation.
+        if image.size != (SCREEN_WIDTH, SCREEN_HEIGHT) or image.mode != "RGB":
+            image = image.resize((SCREEN_WIDTH, SCREEN_HEIGHT), Image.BILINEAR).convert("RGB")
+        arr = np.array(image, dtype=np.uint8)
         r = _gamma_r[arr[:, :, 0]].astype(np.uint16)
         g = _gamma_g[arr[:, :, 1]].astype(np.uint16)
         b = _gamma_b[arr[:, :, 2]].astype(np.uint16)
@@ -1708,38 +1714,31 @@ def display_image_on_waveshare(image):
             except Exception as e2:
                 print(f"Failed to reset waveshare display: {e2}")
 
-def display_image_on_framebuffer(image):
-    global last_display_time, MIN_DISPLAY_INTERVAL
-    now = time.time()
-    if now - last_display_time < MIN_DISPLAY_INTERVAL: 
-        return
-    last_display_time = now
-    with display_lock:
-        display_type = config.get("display", {}).get("type", "framebuffer")
-        if display_type == "st7789" and HAS_ST7789:
-            display_image_on_st7789(image)
-        elif display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
-            display_image_on_waveshare(image)
-        else:
-            display_image_on_original_fb(image)
+def _display_image_on_framebuffer_unlocked(image):
+    display_type = config.get("display", {}).get("type", "framebuffer")
+    if display_type == "st7789" and HAS_ST7789:
+        display_image_on_st7789(image)
+    elif display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
+        display_image_on_waveshare(image)
+    else:
+        display_image_on_original_fb(image)
 
 def update_display():
-    global START_SCREEN
-    global MIN_DISPLAY_INTERVAL
-    display_type = config.get("display", {}).get("type", "framebuffer")
-    if display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
-        img = draw_waveshare_simple(weather_info, spotify_track)
-    else:
-        if START_SCREEN == "weather":
-            img = draw_weather_image(weather_info)
-        elif START_SCREEN == "spotify":
-            img = draw_spotify_image(spotify_track)
-        elif START_SCREEN == "time":
-            img = draw_clock_image()
+    global START_SCREEN, MIN_DISPLAY_INTERVAL, last_display_time
+    global last_display_time, MIN_DISPLAY_INTERVAL
+    now = time.time()
+    if now - last_display_time < MIN_DISPLAY_INTERVAL:
+        return
+    last_display_time = now
+
+    with display_lock:
+        display_type = config.get("display", {}).get("type", "framebuffer")
+        if display_type == "waveshare_epd" and HAS_WAVESHARE_EPD:
+            img = draw_waveshare_simple(weather_info, spotify_track)
         else:
-            img = draw_clock_image()
-    MIN_DISPLAY_INTERVAL = 1.0 / 30.0
-    display_image_on_framebuffer(img)
+            img = draw_spotify_image(spotify_track) if START_SCREEN == "spotify" else draw_weather_image(weather_info) if START_SCREEN == "weather" else draw_clock_image()
+        MIN_DISPLAY_INTERVAL = 1.0 / 30.0
+        _display_image_on_framebuffer_unlocked(img)
 
 def clear_framebuffer():
     display_type = config.get("display", {}).get("type", "framebuffer")
@@ -1788,12 +1787,18 @@ def capture_frames_background():
 def reload_config():
     global config, HAS_WAVESHARE_EPD, st7789, HAS_ST7789, LARGE_FONT, MEDIUM_FONT, SMALL_FONT
     global SPOT_LARGE_FONT, SPOT_MEDIUM_FONT, SPOT_SMALL_FONT, OPENWEATHER_API_KEY
+    global SPOT_LARGE_FONT, SPOT_MEDIUM_FONT, SPOT_SMALL_FONT, OPENWEATHER_API_KEY, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_AREA, art_pos, artist_pos
     global GOOGLE_GEO_API_KEY, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, REDIRECT_URI
     global START_SCREEN, FALLBACK_CITY, USE_GPSD, USE_GOOGLE_GEO, TIME_DISPLAY
     global PROGRESSBAR_DISPLAY, ENABLE_CURRENT_TRACK_DISPLAY, FRAMEBUFFER, BUTTON_A
     global BUTTON_B, BUTTON_X, BUTTON_Y, CLOCK_TYPE, CLOCK_BACKGROUND, CLOCK_COLOR
 
     config = load_config()
+    SCREEN_WIDTH = config["display"].get("width", 480)
+    SCREEN_HEIGHT = config["display"].get("height", 320)
+    SCREEN_AREA = SCREEN_WIDTH * SCREEN_HEIGHT
+    art_pos = [float(SCREEN_WIDTH - 155), float(SCREEN_HEIGHT - 155)]
+    artist_pos = [5.0, float(SCREEN_HEIGHT - 105)]
     HAS_WAVESHARE_EPD = config["display"]["type"] == "waveshare_epd"
     try:
         import st7789

@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
         "type": "framebuffer",
         "framebuffer": "/dev/fb1",
         "rotation": 0,
+        "width": 480,
+        "height": 320,
         #"st7789": {
         #    "spi_port": 0,
         #    "spi_cs": 1,
@@ -93,18 +95,21 @@ def load_config():
     try:
         with open(CONFIG_PATH, 'r') as f:
             loaded_config = toml.load(f)
-        
-        import copy
-        merged_config = copy.deepcopy(DEFAULT_CONFIG)
-        
-        for category, items in loaded_config.items():
-            if category in merged_config and isinstance(merged_config[category], dict):
-                for key, value in items.items():
-                    merged_config[category][key] = value
-            else:
-                merged_config[category] = items
 
-        save_config(merged_config)
+        def deep_merge(source, destination):
+            """Recursively merge source dict into destination dict."""
+            for key, value in source.items():
+                if isinstance(value, dict):
+                    # get node or create one
+                    node = destination.setdefault(key, {})
+                    deep_merge(value, node)
+                else:
+                    # Set value if key doesn't exist in destination
+                    destination[key] = value
+            return destination
+
+        # Create a deep copy of defaults and merge loaded config into it
+        merged_config = deep_merge(loaded_config, DEFAULT_CONFIG.copy())
         return merged_config
     except Exception as e:
         logger = logging.getLogger('Launcher')
@@ -784,6 +789,8 @@ def save_advanced_config():
         config["display"]["type"] = request.form.get('display_type', 'framebuffer')
         config["display"]["framebuffer"] = request.form.get('framebuffer_device', '/dev/fb1')
         config["display"]["rotation"] = int(request.form.get('rotation', 0))
+        config["display"]["width"] = int(request.form.get('framebuffer_width', 480))
+        config["display"]["height"] = int(request.form.get('framebuffer_height', 320))
         if "st7789" not in config["display"]:
             config["display"]["st7789"] = {}
         config["display"]["st7789"]["spi_port"] = int(request.form.get('spi_port', 0))
